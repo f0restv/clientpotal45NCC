@@ -1,0 +1,623 @@
+// Prisma Schema for CoinVault - Collectibles E-commerce Platform
+// This schema covers: Users, Clients, Products, Auctions, Orders, Invoices,
+// Multi-platform integrations, and Price tracking
+
+generator client {
+  provider = "prisma-client-js"
+}
+
+datasource db {
+  provider = "postgresql"
+  url      = env("DATABASE_URL")
+}
+
+// ==================== AUTHENTICATION ====================
+
+model User {
+  id            String    @id @default(cuid())
+  name          String?
+  email         String    @unique
+  emailVerified DateTime?
+  image         String?
+  password      String?
+  role          UserRole  @default(CLIENT)
+  createdAt     DateTime  @default(now())
+  updatedAt     DateTime  @updatedAt
+
+  // Relations
+  accounts      Account[]
+  sessions      Session[]
+  submissions   Submission[]
+  invoices      Invoice[]
+  orders        Order[]
+  bids          Bid[]
+  watchlist     WatchlistItem[]
+  notifications Notification[]
+  addresses     Address[]
+}
+
+model Account {
+  id                String  @id @default(cuid())
+  userId            String
+  type              String
+  provider          String
+  providerAccountId String
+  refresh_token     String? @db.Text
+  access_token      String? @db.Text
+  expires_at        Int?
+  token_type        String?
+  scope             String?
+  id_token          String? @db.Text
+  session_state     String?
+
+  user User @relation(fields: [userId], references: [id], onDelete: Cascade)
+
+  @@unique([provider, providerAccountId])
+}
+
+model Session {
+  id           String   @id @default(cuid())
+  sessionToken String   @unique
+  userId       String
+  expires      DateTime
+  user         User     @relation(fields: [userId], references: [id], onDelete: Cascade)
+}
+
+model VerificationToken {
+  identifier String
+  token      String   @unique
+  expires    DateTime
+
+  @@unique([identifier, token])
+}
+
+enum UserRole {
+  ADMIN
+  STAFF
+  CLIENT
+  BUYER
+}
+
+model Address {
+  id        String  @id @default(cuid())
+  userId    String
+  name      String
+  street1   String
+  street2   String?
+  city      String
+  state     String
+  zip       String
+  country   String  @default("US")
+  isDefault Boolean @default(false)
+
+  user   User    @relation(fields: [userId], references: [id], onDelete: Cascade)
+  orders Order[]
+}
+
+// ==================== PRODUCTS & INVENTORY ====================
+
+model Category {
+  id          String     @id @default(cuid())
+  name        String
+  slug        String     @unique
+  description String?
+  image       String?
+  parentId    String?
+  order       Int        @default(0)
+  createdAt   DateTime   @default(now())
+  updatedAt   DateTime   @updatedAt
+
+  parent   Category?  @relation("CategoryHierarchy", fields: [parentId], references: [id])
+  children Category[] @relation("CategoryHierarchy")
+  products Product[]
+}
+
+model Product {
+  id               String        @id @default(cuid())
+  sku              String        @unique
+  title            String
+  description      String        @db.Text
+  shortDescription String?
+  categoryId       String
+
+  // Pricing
+  listingType      ListingType   @default(BUY_NOW)
+  price            Decimal?      @db.Decimal(10, 2)
+  costBasis        Decimal?      @db.Decimal(10, 2)
+
+  // Metal content for dynamic pricing
+  metalType        MetalType?
+  metalWeight      Decimal?      @db.Decimal(10, 4)  // in troy ounces
+  metalPurity      Decimal?      @db.Decimal(5, 4)   // e.g., 0.999 for .999 fine
+  premiumPercent   Decimal?      @db.Decimal(5, 2)   // premium over spot
+  premiumFlat      Decimal?      @db.Decimal(10, 2)  // flat premium
+
+  // Coin/Collectible Details
+  year             Int?
+  mint             String?
+  grade            String?
+  certification    String?       // PCGS, NGC, etc.
+  certNumber       String?
+  population       Int?
+
+  // Physical Details
+  weight           Decimal?      @db.Decimal(10, 4)
+  diameter         Decimal?      @db.Decimal(6, 2)
+  thickness        Decimal?      @db.Decimal(6, 2)
+
+  // Inventory
+  quantity         Int           @default(1)
+  status           ProductStatus @default(DRAFT)
+  condition        String?
+
+  // Source tracking (for consignment)
+  submissionId     String?
+  isConsignment    Boolean       @default(false)
+  consignmentRate  Decimal?      @db.Decimal(5, 2)   // commission percentage
+
+  // SEO & Display
+  featured         Boolean       @default(false)
+  views            Int           @default(0)
+
+  createdAt        DateTime      @default(now())
+  updatedAt        DateTime      @updatedAt
+
+  // Relations
+  category         Category      @relation(fields: [categoryId], references: [id])
+  submission       Submission?   @relation(fields: [submissionId], references: [id])
+  images           ProductImage[]
+  auction          Auction?
+  orderItems       OrderItem[]
+  watchlistItems   WatchlistItem[]
+  platformListings PlatformListing[]
+  priceHistory     PriceHistory[]
+  marketAnalysis   MarketAnalysis[]
+
+  @@index([categoryId])
+  @@index([status])
+  @@index([metalType])
+  @@index([featured])
+}
+
+model ProductImage {
+  id        String   @id @default(cuid())
+  productId String
+  url       String
+  alt       String?
+  order     Int      @default(0)
+  isPrimary Boolean  @default(false)
+  createdAt DateTime @default(now())
+
+  product Product @relation(fields: [productId], references: [id], onDelete: Cascade)
+}
+
+enum ListingType {
+  BUY_NOW
+  AUCTION
+  BOTH
+}
+
+enum ProductStatus {
+  DRAFT
+  PENDING_REVIEW
+  ACTIVE
+  SOLD
+  RESERVED
+  ARCHIVED
+}
+
+enum MetalType {
+  GOLD
+  SILVER
+  PLATINUM
+  PALLADIUM
+  COPPER
+  NONE
+}
+
+// ==================== AUCTIONS ====================
+
+model Auction {
+  id            String        @id @default(cuid())
+  productId     String        @unique
+  startPrice    Decimal       @db.Decimal(10, 2)
+  reservePrice  Decimal?      @db.Decimal(10, 2)
+  buyNowPrice   Decimal?      @db.Decimal(10, 2)
+  currentBid    Decimal?      @db.Decimal(10, 2)
+  bidIncrement  Decimal       @default(1.00) @db.Decimal(10, 2)
+  startTime     DateTime
+  endTime       DateTime
+  status        AuctionStatus @default(SCHEDULED)
+  winnerUserId  String?
+  finalPrice    Decimal?      @db.Decimal(10, 2)
+  createdAt     DateTime      @default(now())
+  updatedAt     DateTime      @updatedAt
+
+  product Product @relation(fields: [productId], references: [id], onDelete: Cascade)
+  bids    Bid[]
+}
+
+model Bid {
+  id        String   @id @default(cuid())
+  auctionId String
+  userId    String
+  amount    Decimal  @db.Decimal(10, 2)
+  maxBid    Decimal? @db.Decimal(10, 2) // for proxy bidding
+  isWinning Boolean  @default(false)
+  createdAt DateTime @default(now())
+
+  auction Auction @relation(fields: [auctionId], references: [id], onDelete: Cascade)
+  user    User    @relation(fields: [userId], references: [id])
+
+  @@index([auctionId])
+  @@index([userId])
+}
+
+enum AuctionStatus {
+  SCHEDULED
+  ACTIVE
+  ENDED
+  SOLD
+  RESERVE_NOT_MET
+  CANCELLED
+}
+
+// ==================== CLIENT SUBMISSIONS ====================
+
+model Submission {
+  id              String           @id @default(cuid())
+  userId          String
+  status          SubmissionStatus @default(PENDING)
+
+  // Client provided info
+  title           String
+  description     String?          @db.Text
+  category        String?
+  estimatedValue  Decimal?         @db.Decimal(10, 2)
+
+  // AI Analysis
+  aiAnalysis      Json?            // Claude's market analysis
+  suggestedPrice  Decimal?         @db.Decimal(10, 2)
+  marketComps     Json?            // Comparable sales data
+  estimatedDays   Int?             // Estimated days to sell
+
+  // Admin review
+  reviewNotes     String?          @db.Text
+  reviewedBy      String?
+  reviewedAt      DateTime?
+
+  // Shipping
+  shippingMethod  String?
+  trackingNumber  String?
+  receivedAt      DateTime?
+
+  createdAt       DateTime         @default(now())
+  updatedAt       DateTime         @updatedAt
+
+  user     User              @relation(fields: [userId], references: [id])
+  images   SubmissionImage[]
+  products Product[]
+  invoice  Invoice?
+
+  @@index([userId])
+  @@index([status])
+}
+
+model SubmissionImage {
+  id           String   @id @default(cuid())
+  submissionId String
+  url          String
+  type         String   @default("photo") // photo, certificate, receipt
+  order        Int      @default(0)
+  createdAt    DateTime @default(now())
+
+  submission Submission @relation(fields: [submissionId], references: [id], onDelete: Cascade)
+}
+
+enum SubmissionStatus {
+  PENDING
+  RECEIVED
+  UNDER_REVIEW
+  APPROVED
+  LISTED
+  SOLD
+  RETURNED
+  REJECTED
+}
+
+// ==================== ORDERS & INVOICES ====================
+
+model Order {
+  id              String      @id @default(cuid())
+  orderNumber     String      @unique
+  userId          String
+  addressId       String?
+  status          OrderStatus @default(PENDING)
+
+  subtotal        Decimal     @db.Decimal(10, 2)
+  shipping        Decimal     @default(0) @db.Decimal(10, 2)
+  tax             Decimal     @default(0) @db.Decimal(10, 2)
+  total           Decimal     @db.Decimal(10, 2)
+
+  // Payment
+  paymentMethod   String?
+  paymentIntentId String?
+  paidAt          DateTime?
+
+  // Shipping
+  shippingMethod  String?
+  trackingNumber  String?
+  shippedAt       DateTime?
+  deliveredAt     DateTime?
+
+  notes           String?     @db.Text
+
+  createdAt       DateTime    @default(now())
+  updatedAt       DateTime    @updatedAt
+
+  user    User        @relation(fields: [userId], references: [id])
+  address Address?    @relation(fields: [addressId], references: [id])
+  items   OrderItem[]
+}
+
+model OrderItem {
+  id        String  @id @default(cuid())
+  orderId   String
+  productId String
+  quantity  Int
+  price     Decimal @db.Decimal(10, 2)
+
+  order   Order   @relation(fields: [orderId], references: [id], onDelete: Cascade)
+  product Product @relation(fields: [productId], references: [id])
+}
+
+enum OrderStatus {
+  PENDING
+  PAID
+  PROCESSING
+  SHIPPED
+  DELIVERED
+  CANCELLED
+  REFUNDED
+}
+
+model Invoice {
+  id            String        @id @default(cuid())
+  invoiceNumber String        @unique
+  userId        String
+  submissionId  String?       @unique
+  type          InvoiceType
+  status        InvoiceStatus @default(DRAFT)
+
+  // Line items stored as JSON for flexibility
+  lineItems     Json
+
+  subtotal      Decimal       @db.Decimal(10, 2)
+  fees          Decimal       @default(0) @db.Decimal(10, 2)
+  credits       Decimal       @default(0) @db.Decimal(10, 2)
+  total         Decimal       @db.Decimal(10, 2)
+
+  dueDate       DateTime?
+  paidAt        DateTime?
+  paymentMethod String?
+
+  notes         String?       @db.Text
+
+  createdAt     DateTime      @default(now())
+  updatedAt     DateTime      @updatedAt
+
+  user       User        @relation(fields: [userId], references: [id])
+  submission Submission? @relation(fields: [submissionId], references: [id])
+}
+
+enum InvoiceType {
+  CONSIGNMENT_SALE   // Client owes fees after sale
+  PURCHASE           // We're buying from client
+  LISTING_FEES       // Fees for listing services
+  PAYOUT             // Paying client for sold items
+}
+
+enum InvoiceStatus {
+  DRAFT
+  SENT
+  VIEWED
+  PAID
+  OVERDUE
+  CANCELLED
+}
+
+// ==================== MULTI-PLATFORM INTEGRATION ====================
+
+model PlatformConnection {
+  id           String   @id @default(cuid())
+  platform     Platform
+  isActive     Boolean  @default(true)
+
+  // OAuth tokens
+  accessToken  String?  @db.Text
+  refreshToken String?  @db.Text
+  expiresAt    DateTime?
+
+  // Platform-specific config
+  storeId      String?
+  storeName    String?
+  config       Json?
+
+  createdAt    DateTime @default(now())
+  updatedAt    DateTime @updatedAt
+
+  listings PlatformListing[]
+
+  @@unique([platform])
+}
+
+model PlatformListing {
+  id           String              @id @default(cuid())
+  productId    String
+  connectionId String
+
+  externalId   String              // ID on the external platform
+  externalUrl  String?
+  status       PlatformListStatus  @default(PENDING)
+
+  // Sync tracking
+  lastSyncAt   DateTime?
+  syncErrors   String?             @db.Text
+
+  createdAt    DateTime            @default(now())
+  updatedAt    DateTime            @updatedAt
+
+  product    Product            @relation(fields: [productId], references: [id], onDelete: Cascade)
+  connection PlatformConnection @relation(fields: [connectionId], references: [id])
+
+  @@unique([productId, connectionId])
+  @@index([externalId])
+}
+
+enum Platform {
+  EBAY
+  ETSY
+  AUCTIONFLEX360
+  WHATNOT
+  HIBID
+  PROXIBID
+}
+
+enum PlatformListStatus {
+  PENDING
+  ACTIVE
+  SOLD
+  ENDED
+  ERROR
+  REMOVED
+}
+
+// ==================== PRICE TRACKING ====================
+
+model MetalPrice {
+  id        String    @id @default(cuid())
+  metalType MetalType
+  spotPrice Decimal   @db.Decimal(10, 2)
+  askPrice  Decimal?  @db.Decimal(10, 2)
+  bidPrice  Decimal?  @db.Decimal(10, 2)
+  change    Decimal?  @db.Decimal(10, 2)
+  changePct Decimal?  @db.Decimal(6, 4)
+  source    String    @default("api")
+  timestamp DateTime  @default(now())
+
+  @@index([metalType, timestamp])
+}
+
+model PriceHistory {
+  id        String   @id @default(cuid())
+  productId String
+  price     Decimal  @db.Decimal(10, 2)
+  reason    String?  // "spot_update", "manual", "sale"
+  createdAt DateTime @default(now())
+
+  product Product @relation(fields: [productId], references: [id], onDelete: Cascade)
+
+  @@index([productId, createdAt])
+}
+
+model MarketAnalysis {
+  id          String   @id @default(cuid())
+  productId   String
+
+  // Scraped comparable data
+  avgPrice    Decimal? @db.Decimal(10, 2)
+  lowPrice    Decimal? @db.Decimal(10, 2)
+  highPrice   Decimal? @db.Decimal(10, 2)
+  salesCount  Int?
+  avgDaysToSell Int?
+
+  // Source data
+  comparables Json?    // Array of comparable listings
+  sources     String[] // URLs or platform names
+
+  // AI Analysis
+  aiSummary   String?  @db.Text
+  confidence  Decimal? @db.Decimal(3, 2) // 0.00 to 1.00
+
+  createdAt   DateTime @default(now())
+
+  product Product @relation(fields: [productId], references: [id], onDelete: Cascade)
+
+  @@index([productId])
+}
+
+// ==================== NOTIFICATIONS & WATCHLIST ====================
+
+model WatchlistItem {
+  id        String   @id @default(cuid())
+  userId    String
+  productId String
+  createdAt DateTime @default(now())
+
+  user    User    @relation(fields: [userId], references: [id], onDelete: Cascade)
+  product Product @relation(fields: [productId], references: [id], onDelete: Cascade)
+
+  @@unique([userId, productId])
+}
+
+model Notification {
+  id        String           @id @default(cuid())
+  userId    String
+  type      NotificationType
+  title     String
+  message   String
+  data      Json?
+  read      Boolean          @default(false)
+  createdAt DateTime         @default(now())
+
+  user User @relation(fields: [userId], references: [id], onDelete: Cascade)
+
+  @@index([userId, read])
+}
+
+enum NotificationType {
+  BID_OUTBID
+  AUCTION_WON
+  AUCTION_ENDED
+  SUBMISSION_UPDATE
+  INVOICE_READY
+  PAYMENT_RECEIVED
+  ORDER_SHIPPED
+  PRICE_DROP
+  PRICE_ALERT
+  SYSTEM
+}
+
+// ==================== SCRAPING & IMPORT ====================
+
+model ScrapingJob {
+  id          String       @id @default(cuid())
+  source      String       // URL or platform
+  status      JobStatus    @default(PENDING)
+  config      Json?        // Scraping configuration
+
+  itemsFound  Int          @default(0)
+  itemsImported Int        @default(0)
+  errors      Json?
+
+  startedAt   DateTime?
+  completedAt DateTime?
+  createdAt   DateTime     @default(now())
+}
+
+enum JobStatus {
+  PENDING
+  RUNNING
+  COMPLETED
+  FAILED
+  CANCELLED
+}
+
+// ==================== SETTINGS ====================
+
+model Setting {
+  id        String   @id @default(cuid())
+  key       String   @unique
+  value     Json
+  updatedAt DateTime @updatedAt
+}
